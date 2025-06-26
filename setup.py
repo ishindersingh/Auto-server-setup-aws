@@ -86,13 +86,15 @@ def create_ftp_user(username="admin", password="power"):
         print(f"User {username} already exists.")
     else:
         encrypted_pwd = crypt.crypt(password, crypt.mksalt(crypt.METHOD_SHA512))
-        run(f"useradd -m -s /bin/bash -p '{encrypted_pwd}' {username}")
+        run("getent group ftpusers || groupadd ftpusers")
+        run(f"useradd -m -s /bin/bash -p '{encrypted_pwd}' -g ftpusers {username}")
 
     ftp_dir = f"/home/{username}/ftp/files"
     os.makedirs(ftp_dir, exist_ok=True)
     run(f"chown -R {username}:{username} /home/{username}/ftp")
     run(f"chmod -R 755 /home/{username}/ftp")
     run(f"usermod -s /usr/sbin/nologin {username}")
+
 
 def main():
     install_lamp()
