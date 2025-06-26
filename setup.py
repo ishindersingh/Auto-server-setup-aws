@@ -13,14 +13,30 @@ def run(cmd, check=True):
     else:
         print(result.stdout.strip())
 
-def install_lamp():
-    print("\nInstalling LAMP (Apache, MySQL, PHP)...")
+def install_lamp_phpmyadmin():
+    print("\nInstalling Apache, MySQL, PHP, and phpMyAdmin...")
     run("apt update")
-    run("apt install -y apache2 gedit mysql-server php libapache2-mod-php php-mysql")
+    run("apt install -y apache2 mysql-server php libapache2-mod-php php-mysql")
     run("systemctl enable apache2")
     run("systemctl start apache2")
     run("systemctl enable mysql")
     run("systemctl start mysql")
+
+    # Install phpMyAdmin without interaction
+    run("echo 'phpmyadmin phpmyadmin/dbconfig-install boolean true' | debconf-set-selections")
+    run("echo 'phpmyadmin phpmyadmin/app-password-confirm password root' | debconf-set-selections")
+    run("echo 'phpmyadmin phpmyadmin/mysql/admin-pass password root' | debconf-set-selections")
+    run("echo 'phpmyadmin phpmyadmin/mysql/app-pass password root' | debconf-set-selections")
+    run("echo 'phpmyadmin phpmyadmin/reconfigure-webserver multiselect apache2' | debconf-set-selections")
+    run("DEBIAN_FRONTEND=noninteractive apt install -y phpmyadmin")
+
+    # Enable PHP extensions and restart Apache
+    run("phpenmod mysqli")
+    run("systemctl restart apache2")
+
+    # Link phpMyAdmin manually if not auto-linked
+    if not os.path.exists("/var/www/html/phpmyadmin"):
+        run("ln -s /usr/share/phpmyadmin /var/www/html/phpmyadmin")
 
 def secure_mysql():
     print("\nSecuring MySQL...")
@@ -85,25 +101,25 @@ def create_ftp_user(username="admin", password="power"):
     if result.returncode == 0:
         print(f"User {username} already exists.")
     else:
-        encrypted_pwd = crypt.crypt(password, crypt.mksalt(crypt.METHOD_SHA512))
+        # Create group if not exists
         run("getent group ftpusers || groupadd ftpusers")
-        run(f"useradd -m -s /bin/bash -p '{encrypted_pwd}' -g ftpusers {username}")
+        encrypted_pwd = crypt.crypt(password, crypt.mksalt(crypt.METHOD_SHA512))
+        run(f"useradd -m -s /usr/sbin/nologin -p '{encrypted_pwd}' -g ftpusers {username}")
 
     ftp_dir = f"/home/{username}/ftp/files"
     os.makedirs(ftp_dir, exist_ok=True)
     run(f"chown -R {username}:{username} /home/{username}/ftp")
     run(f"chmod -R 755 /home/{username}/ftp")
-    run(f"usermod -s /usr/sbin/nologin {username}")
-
 
 def main():
-    install_lamp()
+    install_lamp_phpmyadmin()
     secure_mysql()
     install_vsftpd()
     create_ftp_user()
 
     print("\nSetup completed.")
     print("Apache: http://<your-server-ip>")
+    print("phpMyAdmin: http://<your-server-ip>/phpmyadmin")
     print("MySQL root password: root")
     print("FTP credentials - Username: admin, Password: power")
 
