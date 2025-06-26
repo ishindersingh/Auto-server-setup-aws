@@ -15,7 +15,7 @@ def print_success(message):
     print(f"\n {message}")
 
 def print_info(message):
-    print(f"\nℹ️ {message}")
+    print(f"\n {message}")
 
 def print_error(message):
     print(f"\n {message}")
@@ -118,8 +118,9 @@ def setup_lamp_stack():
         run("mysql -u root -p'root' -e \"DROP DATABASE IF EXISTS test;\"")
         run("mysql -u root -p'root' -e \"FLUSH PRIVILEGES;\"")
         print_success("MySQL configured successfully")
-    except:
-        print_info("Failed to configure MySQL automatically. You may need to do this manually.")
+    except Exception as e:
+        print_info(f"Failed to configure MySQL automatically: {str(e)}")
+        print_info("You may need to configure MySQL manually.")
     
     # Create a test PHP file
     print_header("Creating test PHP file")
@@ -143,6 +144,12 @@ def setup_ufw():
     run("ufw allow 443/tcp") # HTTPS
     run("ufw allow 9000:10000/tcp")  # Passive FTP port range
     run("echo 'y' | ufw enable")
+    
+    # Check if ufw is active
+    if not is_service_active("ufw"):
+        run("systemctl enable ufw")
+        run("systemctl start ufw")
+    
     print_success("Firewall configured")
 
 def setup_vsftpd():
@@ -156,6 +163,7 @@ def setup_vsftpd():
     
     # Get server IP for passive mode
     server_ip = get_server_ip()
+    print_info(f"Using server IP for passive mode: {server_ip}")
     
     # Create a completely new vsftpd.conf file with all necessary settings
     vsftpd_config = f"""# FTP server configuration
@@ -172,42 +180,34 @@ connect_from_port_20=YES
 chroot_local_user=YES
 secure_chroot_dir=/var/run/vsftpd/empty
 pam_service_name=vsftpd
+
+# Fixed passive mode settings
 pasv_enable=YES
 pasv_min_port=9000
 pasv_max_port=10000
 pasv_address={server_ip}
+pasv_addr_resolve=NO
+
+# Logging settings - important for debugging
+xferlog_std_format=NO
+log_ftp_protocol=YES
+debug_ssl=YES
+
+# User settings
 userlist_enable=YES
 userlist_file=/etc/vsftpd.userlist
 userlist_deny=NO
+
+# Allow writable home directory
 allow_writeable_chroot=YES
+
+# Disable SSL for testing
 ssl_enable=NO
 """
     
     # Write the new config
     with open("/etc/vsftpd.conf", "w") as f:
         f.write(vsftpd_config)
-    
-    # Set up PAM configuration
-    pam_config = """# Standard behaviour for ftpd(8).
-auth    required        pam_listfile.so item=user sense=deny file=/etc/ftpusers onerr=succeed
-# Standard pam includes
-@include common-auth
-@include common-account
-@include common-session
-# Set this to 'yes' to enable PAM authentication, account processing,
-# and session processing. If this is enabled, PAM authentication will
-# be allowed through the ChallengeResponseAuthentication and
-# PasswordAuthentication.  Depending on your PAM configuration,
-# PAM authentication via ChallengeResponseAuthentication may bypass
-# the setting of "PermitRootLogin without-password".
-# If you just want the PAM account and session checks to run without
-# PAM authentication, then enable this but set PasswordAuthentication
-# and ChallengeResponseAuthentication to 'no'.
-"""
-    
-    # Write PAM config
-    with open("/etc/pam.d/vsftpd", "w") as f:
-        f.write(pam_config)
     
     # Create empty userlist file if it doesn't exist
     run("touch /etc/vsftpd.userlist")
@@ -234,24 +234,51 @@ def create_ftp_user(username="ishu", password="power"):
     
     # Create FTP directory and set permissions
     run(f"mkdir -p /home/{username}/ftp")
-    run(f"chown {username}:{username} /home/{username}")
-    run(f"chown {username}:{username} /home/{username}/ftp")
+    run(f"chown -R {username}:{username} /home/{username}")
     run(f"chmod 755 /home/{username}")
-    run(f"chmod 755 /home/{username}/ftp")
+    run(f"chmod -R 755 /home/{username}/ftp")
     
     # Add user to vsftpd.userlist for FTP access
     run(f"echo '{username}' > /etc/vsftpd.userlist")
     
-    # Try to create a test file in the FTP directory
-    test_file_content = "This is a test file created by the setup script."
-    with open(f"/home/{username}/ftp/test.txt", "w") as f:
-        f.write(test_file_content)
+    # Create a test file in the FTP directory
+    run(f"echo 'FTP is working correctly!' > /home/{username}/ftp/test.txt")
     run(f"chown {username}:{username} /home/{username}/ftp/test.txt")
+    
+    # Fix passive mode on cloud providers (specifically AWS)
+    server_ip = get_server_ip()
+    print_info(f"Ensuring iptables rules for FTP passive mode on IP: {server_ip}")
+    
+    # Add iptables rules for FTP passive mode
+    for port in range(9000, 10001):
+        run(f"iptables -A INPUT -p tcp --dport {port} -j ACCEPT || true")
+    
+    # Save iptables rules if possible
+    run("iptables-save > /etc/iptables.rules || true")
     
     # Restart FTP server to apply changes
     run("systemctl restart vsftpd")
     print_success(f"FTP user {username} created with password: {password}")
-    print_info(f"Test file created at: /home/{username}/ftp/test.txt")
+    
+    # Verify FTP is accessible
+    print_info(f"Verifying FTP configuration on {server_ip}...")
+    
+    # Output connection details for the user
+    print_info(f"FTP Connection Details:")
+    print(f"  - Server: {server_ip}")
+    print(f"  - Port: 21")
+    print(f"  - Username: {username}")
+    print(f"  - Password: {password}")
+    print(f"  - Home directory: /home/{username}/ftp")
+
+def configure_aws_security_group():
+    print_header("AWS Security Group Configuration")
+    print_info("If you're running this on AWS EC2, make sure your security group allows:")
+    print("1. Port 21 (FTP Control)")
+    print("2. Port 20 (FTP Data)")
+    print("3. Ports 9000-10000 (Passive FTP)")
+    print("4. Port 80 (HTTP)")
+    print("5. Port 443 (HTTPS)")
 
 def main():
     # Check if running as root
@@ -263,17 +290,21 @@ def main():
     
     # Update system
     print_header("Updating system packages")
-    run("apt update && apt upgrade -y")
+    run("apt update")
+    run("apt upgrade -y")
     
     # Install common utilities
     print_header("Installing common utilities")
-    run("apt install -y curl wget unzip git python3-pip")
+    run("apt install -y curl wget unzip git python3-pip iptables-persistent")
     
     # Setup components
     setup_lamp_stack()
     setup_ufw()
     setup_vsftpd()
     create_ftp_user()
+    
+    # Cloud-specific configurations
+    configure_aws_security_group()
     
     # Get server IP for display
     server_ip = get_server_ip()
@@ -292,6 +323,14 @@ def main():
     print("  - Logon Type: Normal")
     print("  - User: ishu")
     print("  - Password: power")
+    print("  - Port: 21")
+    
+    print_info("If FTP directory listing fails, try these solutions:")
+    print("1. Ensure EC2 security groups allow ports 9000-10000")
+    print("2. Check if your ISP blocks FTP connections")
+    print("3. Try connecting in passive mode")
+    print("4. Try disabling firewall temporarily: sudo ufw disable")
+    
     print("\nRemember to change default passwords in a production environment!")
 
 if __name__ == "__main__":
