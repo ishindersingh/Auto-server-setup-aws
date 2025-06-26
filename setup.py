@@ -1,7 +1,10 @@
+#!/usr/bin/env python3
 import os
 import subprocess
 import sys
 import time
+import socket
+import platform
 
 def print_header(message):
     print(f"\n{'=' * 50}")
@@ -13,6 +16,9 @@ def print_success(message):
 
 def print_info(message):
     print(f"\nℹ️ {message}")
+
+def print_error(message):
+    print(f"\n {message}")
 
 def run(command):
     print(f"Running: {command}")
@@ -27,7 +33,8 @@ def run(command):
 def run_with_output(command):
     try:
         return subprocess.check_output(command, shell=True).decode('utf-8').strip()
-    except:
+    except Exception as e:
+        print(f"Command failed: {command}, Error: {str(e)}")
         return ""
 
 def is_service_active(service_name):
@@ -40,8 +47,32 @@ def is_service_active(service_name):
 
 def check_root():
     if os.geteuid() != 0:
-        print("This script must be run as root.")
+        print_error("This script must be run as root (sudo).")
         sys.exit(1)
+
+def get_server_ip():
+    # Try multiple methods to get the public IP
+    for command in [
+        "curl -s ifconfig.me",
+        "curl -s icanhazip.com",
+        "curl -s ipinfo.io/ip",
+        "curl -s api.ipify.org"
+    ]:
+        ip = run_with_output(command)
+        if ip and len(ip.split('.')) == 4:
+            return ip.strip()
+    
+    # Fallback to local IP if public IP cannot be determined
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.connect(('8.8.8.8', 1))  # Connect to Google DNS
+        local_ip = s.getsockname()[0]
+        return local_ip
+    except Exception as e:
+        print_error(f"Could not determine IP address: {e}")
+        return "YOUR_SERVER_IP"  # Placeholder
+    finally:
+        s.close()
 
 def setup_lamp_stack():
     print_header("Installing LAMP Stack")
@@ -100,13 +131,11 @@ def setup_lamp_stack():
         f.write(php_content)
     
     print_success("LAMP stack installation completed")
-    print_info("You can access phpMyAdmin at: http://your-server-ip/phpmyadmin")
-    print_info("Username: root, Password: root")
-    print_info("You can test PHP at: http://your-server-ip/info.php")
 
 def setup_ufw():
     print_header("Setting up Firewall")
     # Make sure we explicitly allow required ports
+    run("apt install -y ufw")
     run("ufw allow OpenSSH")
     run("ufw allow 20/tcp")  # FTP data
     run("ufw allow 21/tcp")  # FTP control
@@ -122,10 +151,14 @@ def setup_vsftpd():
     print_success("vsftpd installed")
     
     # Backup original config
-    run("cp /etc/vsftpd.conf /etc/vsftpd.conf.bak")
+    if os.path.exists("/etc/vsftpd.conf"):
+        run("cp /etc/vsftpd.conf /etc/vsftpd.conf.bak")
+    
+    # Get server IP for passive mode
+    server_ip = get_server_ip()
     
     # Create a completely new vsftpd.conf file with all necessary settings
-    vsftpd_config = """# FTP server configuration
+    vsftpd_config = f"""# FTP server configuration
 listen=YES
 listen_ipv6=NO
 anonymous_enable=NO
@@ -142,7 +175,7 @@ pam_service_name=vsftpd
 pasv_enable=YES
 pasv_min_port=9000
 pasv_max_port=10000
-pasv_address=AUTO_IP_ADDRESS
+pasv_address={server_ip}
 userlist_enable=YES
 userlist_file=/etc/vsftpd.userlist
 userlist_deny=NO
@@ -150,18 +183,31 @@ allow_writeable_chroot=YES
 ssl_enable=NO
 """
     
-    # Try to get the public IP address
-    public_ip = run_with_output("curl -s ifconfig.me || curl -s icanhazip.com || curl -s ipinfo.io/ip || curl -s api.ipify.org")
-    if public_ip:
-        # Replace AUTO_IP_ADDRESS with the actual IP
-        vsftpd_config = vsftpd_config.replace("AUTO_IP_ADDRESS", public_ip.strip())
-    else:
-        # If we can't get the IP, remove that line
-        vsftpd_config = vsftpd_config.replace("pasv_address=AUTO_IP_ADDRESS\n", "")
-    
     # Write the new config
     with open("/etc/vsftpd.conf", "w") as f:
         f.write(vsftpd_config)
+    
+    # Set up PAM configuration
+    pam_config = """# Standard behaviour for ftpd(8).
+auth    required        pam_listfile.so item=user sense=deny file=/etc/ftpusers onerr=succeed
+# Standard pam includes
+@include common-auth
+@include common-account
+@include common-session
+# Set this to 'yes' to enable PAM authentication, account processing,
+# and session processing. If this is enabled, PAM authentication will
+# be allowed through the ChallengeResponseAuthentication and
+# PasswordAuthentication.  Depending on your PAM configuration,
+# PAM authentication via ChallengeResponseAuthentication may bypass
+# the setting of "PermitRootLogin without-password".
+# If you just want the PAM account and session checks to run without
+# PAM authentication, then enable this but set PasswordAuthentication
+# and ChallengeResponseAuthentication to 'no'.
+"""
+    
+    # Write PAM config
+    with open("/etc/pam.d/vsftpd", "w") as f:
+        f.write(pam_config)
     
     # Create empty userlist file if it doesn't exist
     run("touch /etc/vsftpd.userlist")
@@ -174,30 +220,44 @@ ssl_enable=NO
     run("systemctl enable vsftpd")
     print_success("FTP server configured")
 
-def create_ftp_user(username="admin", password="power"):
+def create_ftp_user(username="ishu", password="power"):
     print_header(f"Creating FTP user: {username}")
     
-    # Check if user exists
-    if os.system(f"id {username} >/dev/null 2>&1") != 0:
-        # Create user with home directory
-        run(f"useradd -m -s /bin/bash {username}")
+    # Try to remove the user if it exists (to start fresh)
+    run(f"userdel -r {username} 2>/dev/null || true")
+    
+    # Create the user with a proper shell and home directory
+    run(f"useradd -m -s /bin/bash {username}")
     
     # Set password
     run(f"echo '{username}:{password}' | chpasswd")
     
-    # Create FTP directory structure and set permissions
+    # Create FTP directory and set permissions
     run(f"mkdir -p /home/{username}/ftp")
-    run(f"chown -R {username}:{username} /home/{username}")
-    run(f"chmod -R 755 /home/{username}")
+    run(f"chown {username}:{username} /home/{username}")
+    run(f"chown {username}:{username} /home/{username}/ftp")
+    run(f"chmod 755 /home/{username}")
+    run(f"chmod 755 /home/{username}/ftp")
     
-    # Add user to vsftpd.userlist to allow access
-    run(f"echo '{username}' >> /etc/vsftpd.userlist")
+    # Add user to vsftpd.userlist for FTP access
+    run(f"echo '{username}' > /etc/vsftpd.userlist")
     
+    # Try to create a test file in the FTP directory
+    test_file_content = "This is a test file created by the setup script."
+    with open(f"/home/{username}/ftp/test.txt", "w") as f:
+        f.write(test_file_content)
+    run(f"chown {username}:{username} /home/{username}/ftp/test.txt")
+    
+    # Restart FTP server to apply changes
+    run("systemctl restart vsftpd")
     print_success(f"FTP user {username} created with password: {password}")
-    print_info(f"FTP server is ready. Connect to your server IP on port 21")
+    print_info(f"Test file created at: /home/{username}/ftp/test.txt")
 
 def main():
-    check_root()
+    # Check if running as root
+    if platform.system() == "Linux":
+        check_root()
+    
     print_header("Automatic Server Setup Script")
     print_info("This script will install and configure LAMP stack and FTP server")
     
@@ -207,25 +267,31 @@ def main():
     
     # Install common utilities
     print_header("Installing common utilities")
-    run("apt install -y curl wget unzip git ufw")
+    run("apt install -y curl wget unzip git python3-pip")
     
-    # Setup LAMP stack
+    # Setup components
     setup_lamp_stack()
-    
-    # Setup Firewall
     setup_ufw()
-    
-    # Setup FTP
     setup_vsftpd()
     create_ftp_user()
     
+    # Get server IP for display
+    server_ip = get_server_ip()
+    
     print_header("Setup Complete!")
-    print_info("Your server has been set up with:")
+    print_info(f"Your server has been set up with IP: {server_ip}")
     print("- Apache Web Server")
     print("- MySQL Database Server")
     print("- PHP")
-    print("- phpMyAdmin (http://your-server-ip/phpmyadmin, user: root, pass: root)")
-    print("- FTP Server (user: admin, pass: power)")
+    print(f"- phpMyAdmin (http://{server_ip}/phpmyadmin, user: root, pass: root)")
+    print(f"- FTP Server (user: ishu, pass: power)")
+    print("\nTo connect with FileZilla:")
+    print(f"  - Host: {server_ip}")
+    print("  - Protocol: FTP")
+    print("  - Encryption: None")
+    print("  - Logon Type: Normal")
+    print("  - User: ishu")
+    print("  - Password: power")
     print("\nRemember to change default passwords in a production environment!")
 
 if __name__ == "__main__":
