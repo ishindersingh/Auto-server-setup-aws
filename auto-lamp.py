@@ -12,10 +12,10 @@ def print_header(message):
     print(f"{'=' * 50}")
 
 def print_success(message):
-    print(f"\n {message}")
+    print(f"\n✅ {message}")
 
 def print_info(message):
-    print(f"\n {message}")
+    print(f"\nℹ️ {message}")
 
 def print_error(message):
     print(f"\n❌ {message}")
@@ -77,6 +77,9 @@ def get_server_ip():
 def setup_lamp_stack():
     print_header("Installing LAMP Stack")
     
+    # Update apt repository
+    run("apt update")
+    
     # Install Apache
     run("apt install -y apache2")
     print_success("Apache installed")
@@ -98,14 +101,44 @@ def setup_lamp_stack():
         run("systemctl enable mysql")
         run("systemctl start mysql")
 
-    # Install phpMyAdmin without interaction
+    # Install phpMyAdmin - with better error handling
     print_header("Setting up phpMyAdmin")
-    run("echo 'phpmyadmin phpmyadmin/dbconfig-install boolean true' | debconf-set-selections")
-    run("echo 'phpmyadmin phpmyadmin/app-password-confirm password root' | debconf-set-selections")
-    run("echo 'phpmyadmin phpmyadmin/mysql/admin-pass password root' | debconf-set-selections")
-    run("echo 'phpmyadmin phpmyadmin/mysql/app-pass password root' | debconf-set-selections")
-    run("echo 'phpmyadmin phpmyadmin/reconfigure-webserver multiselect apache2' | debconf-set-selections")
-    run("DEBIAN_FRONTEND=noninteractive apt install -y phpmyadmin")
+    try:
+        # Make sure the universe repository is enabled
+        run("apt-add-repository universe -y")
+        run("apt update")
+        
+        # Set up debconf selections for non-interactive install
+        run("echo 'phpmyadmin phpmyadmin/dbconfig-install boolean true' | debconf-set-selections")
+        run("echo 'phpmyadmin phpmyadmin/app-password-confirm password root' | debconf-set-selections")
+        run("echo 'phpmyadmin phpmyadmin/mysql/admin-pass password root' | debconf-set-selections")
+        run("echo 'phpmyadmin phpmyadmin/mysql/app-pass password root' | debconf-set-selections")
+        run("echo 'phpmyadmin phpmyadmin/reconfigure-webserver multiselect apache2' | debconf-set-selections")
+        
+        # Install phpMyAdmin
+        run("DEBIAN_FRONTEND=noninteractive apt install -y phpmyadmin")
+        print_success("phpMyAdmin installed")
+    except Exception as e:
+        print_error(f"Failed to install phpMyAdmin: {str(e)}")
+        print_info("Trying alternative installation method...")
+        
+        # Alternative method: Download and configure manually
+        try:
+            run("cd /tmp && wget https://www.phpmyadmin.net/downloads/phpMyAdmin-latest-all-languages.tar.gz")
+            run("mkdir -p /usr/share/phpmyadmin")
+            run("tar xvf /tmp/phpMyAdmin-latest-all-languages.tar.gz --strip-components=1 -C /usr/share/phpmyadmin")
+            run("cp /usr/share/phpmyadmin/config.sample.inc.php /usr/share/phpmyadmin/config.inc.php")
+            
+            # Generate blowfish secret
+            blowfish_secret = run('openssl rand -base64 32')
+            run(f"sed -i \"s/\\$cfg\\['blowfish_secret'\\] = '';/\\$cfg\\['blowfish_secret'\\] = '{blowfish_secret}';/g\" /usr/share/phpmyadmin/config.inc.php")
+            
+            # Create symbolic link to Apache document root
+            run("ln -sf /usr/share/phpmyadmin /var/www/html/phpmyadmin")
+            run("systemctl restart apache2")
+            print_success("phpMyAdmin installed manually")
+        except:
+            print_error("Could not install phpMyAdmin. Please install it manually after setup.")
     
     # Configure MySQL Security
     print_header("Configuring MySQL")
@@ -156,13 +189,13 @@ def main():
     
     # Install common utilities
     print_header("Installing common utilities")
+    run("apt install -y curl wget unzip git software-properties-common apt-transport-https ca-certificates")
     
     # Setup components
     setup_lamp_stack()
     
     # Disable firewall instead of setting it up
     setup_ufw()  # This now disables firewall instead of configuring it
-    
     
     # Get server IP for display
     server_ip = get_server_ip()
