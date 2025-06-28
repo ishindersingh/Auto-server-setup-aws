@@ -18,7 +18,7 @@ def print_info(message):
     print(f"\n {message}")
 
 def print_error(message):
-    print(f"\n {message}")
+    print(f"\n❌ {message}")
 
 def run(command):
     print(f"Running: {command}")
@@ -134,23 +134,19 @@ def setup_lamp_stack():
     print_success("LAMP stack installation completed")
 
 def setup_ufw():
-    print_header("Setting up Firewall")
-    # Make sure we explicitly allow required ports
-    run("apt install -y ufw")
-    run("ufw allow OpenSSH")
-    run("ufw allow 20/tcp")  # FTP data
-    run("ufw allow 21/tcp")  # FTP control
-    run("ufw allow 80/tcp")  # HTTP
-    run("ufw allow 443/tcp") # HTTPS
-    run("ufw allow 9000:10000/tcp")  # Passive FTP port range
-    run("echo 'y' | ufw enable")
+    print_header("Firewall Setup")
+    # Disabling firewall as requested
+    if is_service_active("ufw"):
+        run("ufw disable")
+        print_success("Firewall disabled")
     
-    # Check if ufw is active
-    if not is_service_active("ufw"):
-        run("systemctl enable ufw")
-        run("systemctl start ufw")
+    # If firewalld is installed, disable it as well
+    if os.path.exists("/usr/sbin/firewalld"):
+        run("systemctl stop firewalld")
+        run("systemctl disable firewalld")
+        print_success("firewalld disabled")
     
-    print_success("Firewall configured")
+    print_info("Firewall has been disabled as requested. Note that this may reduce server security.")
 
 def setup_vsftpd():
     print_header("Setting up FTP Server")
@@ -177,7 +173,8 @@ dirmessage_enable=YES
 use_localtime=YES
 xferlog_enable=YES
 connect_from_port_20=YES
-chroot_local_user=YES
+# Allow users to access their home directory directly
+chroot_local_user=NO
 secure_chroot_dir=/var/run/vsftpd/empty
 pam_service_name=vsftpd
 
@@ -188,18 +185,14 @@ pasv_max_port=10000
 pasv_address={server_ip}
 pasv_addr_resolve=NO
 
-# Logging settings - important for debugging
+# Logging settings
 xferlog_std_format=NO
 log_ftp_protocol=YES
-debug_ssl=YES
 
 # User settings
 userlist_enable=YES
 userlist_file=/etc/vsftpd.userlist
 userlist_deny=NO
-
-# Allow writable home directory
-allow_writeable_chroot=YES
 
 # Disable SSL for testing
 ssl_enable=NO
@@ -232,53 +225,29 @@ def create_ftp_user(username="ishu", password="power"):
     # Set password
     run(f"echo '{username}:{password}' | chpasswd")
     
-    # Create FTP directory and set permissions
-    run(f"mkdir -p /home/{username}/ftp")
+    # Set permissions for home directory
     run(f"chown -R {username}:{username} /home/{username}")
     run(f"chmod 755 /home/{username}")
-    run(f"chmod -R 755 /home/{username}/ftp")
     
     # Add user to vsftpd.userlist for FTP access
     run(f"echo '{username}' > /etc/vsftpd.userlist")
     
-    # Create a test file in the FTP directory
-    run(f"echo 'FTP is working correctly!' > /home/{username}/ftp/test.txt")
-    run(f"chown {username}:{username} /home/{username}/ftp/test.txt")
-    
-    # Fix passive mode on cloud providers (specifically AWS)
-    server_ip = get_server_ip()
-    print_info(f"Ensuring iptables rules for FTP passive mode on IP: {server_ip}")
-    
-    # Add iptables rules for FTP passive mode
-    for port in range(9000, 10001):
-        run(f"iptables -A INPUT -p tcp --dport {port} -j ACCEPT || true")
-    
-    # Save iptables rules if possible
-    run("iptables-save > /etc/iptables.rules || true")
+    # Create a test file in the home directory
+    run(f"echo 'FTP is working correctly!' > /home/{username}/test.txt")
+    run(f"chown {username}:{username} /home/{username}/test.txt")
     
     # Restart FTP server to apply changes
     run("systemctl restart vsftpd")
     print_success(f"FTP user {username} created with password: {password}")
     
-    # Verify FTP is accessible
-    print_info(f"Verifying FTP configuration on {server_ip}...")
-    
     # Output connection details for the user
+    server_ip = get_server_ip()
     print_info(f"FTP Connection Details:")
     print(f"  - Server: {server_ip}")
     print(f"  - Port: 21")
     print(f"  - Username: {username}")
     print(f"  - Password: {password}")
-    print(f"  - Home directory: /home/{username}/ftp")
-
-def configure_aws_security_group():
-    print_header("AWS Security Group Configuration")
-    print_info("If you're running this on AWS EC2, make sure your security group allows:")
-    print("1. Port 21 (FTP Control)")
-    print("2. Port 20 (FTP Data)")
-    print("3. Ports 9000-10000 (Passive FTP)")
-    print("4. Port 80 (HTTP)")
-    print("5. Port 443 (HTTPS)")
+    print(f"  - Home directory: /home/{username}")
 
 def main():
     # Check if running as root
@@ -295,16 +264,17 @@ def main():
     
     # Install common utilities
     print_header("Installing common utilities")
-    run("apt install -y curl wget unzip git python3-pip iptables-persistent")
+    run("apt install -y curl wget unzip git python3-pip")
     
     # Setup components
     setup_lamp_stack()
-    setup_ufw()
+    
+    # Disable firewall instead of setting it up
+    setup_ufw()  # This now disables firewall instead of configuring it
+    
+    # Setup FTP
     setup_vsftpd()
     create_ftp_user()
-    
-    # Cloud-specific configurations
-    configure_aws_security_group()
     
     # Get server IP for display
     server_ip = get_server_ip()
@@ -324,12 +294,6 @@ def main():
     print("  - User: ishu")
     print("  - Password: power")
     print("  - Port: 21")
-    
-    print_info("If FTP directory listing fails, try these solutions:")
-    print("1. Ensure EC2 security groups allow ports 9000-10000")
-    print("2. Check if your ISP blocks FTP connections")
-    print("3. Try connecting in passive mode")
-    print("4. Try disabling firewall temporarily: sudo ufw disable")
     
     print("\nRemember to change default passwords in a production environment!")
 
