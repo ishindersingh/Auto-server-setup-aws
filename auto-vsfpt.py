@@ -97,7 +97,6 @@ def setup_vsftpd():
     print_header("Setting up FTP Server")
     
     # Install vsftpd if not already installed
-    run("apt-get update")
     run("apt install -y vsftpd curl")
     print_success("vsftpd installed")
     
